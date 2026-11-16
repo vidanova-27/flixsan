@@ -1,0 +1,31 @@
+-- Execute uma única vez no SQL Editor do Supabase.
+create extension if not exists pgcrypto;
+create table if not exists public.profiles(id uuid primary key references auth.users(id) on delete cascade,email text not null,display_name text,role text not null default 'member' check(role in('master','admin','member')),active boolean not null default false,created_at timestamptz not null default now());
+create table if not exists public.invitations(id uuid primary key default gen_random_uuid(),email text not null unique,role text not null default 'member' check(role in('admin','member')),created_by uuid references auth.users(id),created_at timestamptz not null default now());
+create table if not exists public.content(id uuid primary key default gen_random_uuid(),title text not null,type text not null check(type in('Filme','Série')),genre text,year integer,description text,poster text,video_url text not null,season integer,episode integer,created_at timestamptz not null default now());
+create table if not exists public.favorites(user_id uuid not null references auth.users(id) on delete cascade,content_id uuid not null references public.content(id) on delete cascade,primary key(user_id,content_id));
+create table if not exists public.watch_progress(user_id uuid not null references auth.users(id) on delete cascade,content_id uuid not null references public.content(id) on delete cascade,seconds integer not null default 0,updated_at timestamptz not null default now(),primary key(user_id,content_id));
+create or replace function public.is_active() returns boolean language sql stable security definer set search_path='' as $$select exists(select 1 from public.profiles where id=(select auth.uid()) and active=true)$$;
+create or replace function public.is_master() returns boolean language sql stable security definer set search_path='' as $$select exists(select 1 from public.profiles where id=(select auth.uid()) and active=true and role='master')$$;
+create or replace function public.is_admin() returns boolean language sql stable security definer set search_path='' as $$select exists(select 1 from public.profiles where id=(select auth.uid()) and active=true and role in('master','admin'))$$;
+create or replace function public.on_user_created() returns trigger language plpgsql security definer set search_path='' as $$declare r text;begin select role into r from public.invitations where lower(email)=lower(new.email);insert into public.profiles(id,email,display_name,role,active) values(new.id,lower(new.email),split_part(new.email,'@',1),coalesce(r,'member'),r is not null);return new;end$$;
+drop trigger if exists after_auth_user_created on auth.users;
+create trigger after_auth_user_created after insert on auth.users for each row execute function public.on_user_created();
+alter table public.profiles enable row level security;
+alter table public.invitations enable row level security;
+alter table public.content enable row level security;
+alter table public.favorites enable row level security;
+alter table public.watch_progress enable row level security;
+drop policy if exists profiles_read on public.profiles;create policy profiles_read on public.profiles for select to authenticated using(id=(select auth.uid()) or public.is_master());
+drop policy if exists profiles_update on public.profiles;create policy profiles_update on public.profiles for update to authenticated using(public.is_master() and id<>(select auth.uid())) with check(public.is_master() and id<>(select auth.uid()) and role <> 'master');
+drop policy if exists invites_read on public.invitations;create policy invites_read on public.invitations for select to authenticated using(public.is_master());
+drop policy if exists invites_insert on public.invitations;create policy invites_insert on public.invitations for insert to authenticated with check(public.is_master() and created_by=(select auth.uid()));
+drop policy if exists invites_delete on public.invitations;create policy invites_delete on public.invitations for delete to authenticated using(public.is_master());
+drop policy if exists content_read on public.content;create policy content_read on public.content for select to authenticated using(public.is_active());
+drop policy if exists content_insert on public.content;create policy content_insert on public.content for insert to authenticated with check(public.is_admin());
+drop policy if exists content_update on public.content;create policy content_update on public.content for update to authenticated using(public.is_admin()) with check(public.is_admin());
+drop policy if exists content_delete on public.content;create policy content_delete on public.content for delete to authenticated using(public.is_admin());
+drop policy if exists fav_all on public.favorites;create policy fav_all on public.favorites for all to authenticated using(user_id=(select auth.uid()) and public.is_active()) with check(user_id=(select auth.uid()) and public.is_active());
+drop policy if exists progress_all on public.watch_progress;create policy progress_all on public.watch_progress for all to authenticated using(user_id=(select auth.uid()) and public.is_active()) with check(user_id=(select auth.uid()) and public.is_active());
+-- PRIMEIRO MASTER: após cadastrar seu e-mail pelo site, execute manualmente:
+-- update public.profiles set role='master',active=true where email='SEU_EMAIL_AQUI';
